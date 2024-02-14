@@ -145,6 +145,36 @@ Resources:
     Properties:
       QueueName: dlq
 
+
+
+  sqsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Id: 'QueuePolicy'
+        Version: '2012-10-17'
+        Statement:
+        - Sid: 'Owner'
+          Effect: 'Allow'
+          Principal: 
+            AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+          Action:
+          - 'sqs:*'
+          Resource: !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:dlq 
+        - Sid: 'dlq_AccountMoverTarget'
+          Effect: 'Allow'
+          Principal: 
+            Service: 'events.amazonaws.com'
+          Action:
+          - 'sqs:SendMessage'
+          Resource: !GetAtt sqsQueue.Arn
+          Condition:
+            ArnEquals:
+              aws:SourceArn: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/BudgetAlertForwarderRule"
+      Queues:
+        - !Ref sqsQueue
+
+
   BudgetRestrictorEventBus:
     Type: AWS::Events::EventBus
     Properties:
@@ -169,6 +199,7 @@ Resources:
     Properties:
       Description: "Trigger Lambda function for account movement on budget alert"
       EventBusName: !Ref BudgetRestrictorEventBus
+      Name: "BudgetAlertForwarderRule"
       EventPattern:
         source:
           - "lambda.BudgetAlertForwarder"
