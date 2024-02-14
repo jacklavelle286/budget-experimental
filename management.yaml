@@ -1,0 +1,242 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Centralized Event Bus
+  - Located in the management (payer) account.
+  - Designed to receive events from all member accounts.
+
+  Lambda Function for Account Restriction
+  - Triggered by the centralized EventBridge bus when a budget alert is received.
+  - Moves the account that exceeded its budget to a restrictive OU.
+
+  EventBridge Rule
+  - Listens to the centralized event bus for specific budget alert events.
+  - Triggers the Lambda function responsible for moving accounts to the restrictive OU.
+
+  SNS Topic for Notification
+  - Used to notify relevant stakeholders when an account is moved to the restrictive OU.
+
+  Centralized IAM Lambda role
+  - Used by the member account lambda functions to assume to carry out various organization related API calls
+
+Parameters:
+  SubscriptionEndPoint:
+    Type: String
+    Description: The endpoint that receives notifications.
+
+  SubscriptionProtocol:
+    Type: String
+    Description: The subscription protocol
+    AllowedValues:
+      - email
+      - email-json
+      - application
+      - lambda
+    Default: email
+
+  OrgID:
+    Type: String
+    Description: The principal Org ID Id of your AWS Organization.
+
+  DenyAllSCPId:
+    Type: String  
+    Description: The ID of the existing Deny All SCP
+
+Resources:
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "lambda.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Description: "Allowing Lambda account mover to work."
+      Policies:
+        - PolicyName: lambda-role-account-mover
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "organizations:MoveAccount"
+                  - "organizations:ListAccounts"
+                  - "organizations:ListOrganizationalUnitsForParent"
+                  - "organizations:DescribeOrganizationalUnit"
+                  - "organizations:DescribeAccount"
+                  - "organizations:AttachPolicy"
+                Resource: "*"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      RoleName: lambda-role-account-mover
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AccountMover.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt BudgetRestrictorEventBus.Arn
+
+
+
+  AccountMover:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: "account_mover"
+      Environment:
+        Variables:
+          SCPId: !Ref DenyAllSCPId
+    
+      Code:
+        ZipFile: |
+          import json
+          import logging
+          import boto3
+          import os
+
+          # Setting up logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+              logger.info(f"Received event: {json.dumps(event)}")
+              
+              # Directly use the 'detail' field from the event, assuming it's already a dictionary
+              detail = event.get('detail')
+              if not detail:
+                  logger.error("Missing 'detail' field in the event.")
+                  return {"statusCode": 400, "body": "Invalid event format"}
+
+
+              account_id = detail.get('account_id')
+              source_ou_id = detail.get('source_ou_id')
+
+              if not account_id or not source_ou_id:
+                  logger.error("Missing account_id or source_ou_id in the event detail.")
+                  return {"statusCode": 400, "body": "Invalid event detail"}
+
+              # Specify the Deny All SCP ID (You need to replace this with the actual SCP ID)
+              deny_all_scp_id = os.environ['SCPId']
+
+              client = boto3.client('organizations')
+
+              try:
+                  # Attach the Deny All SCP to the source OU
+                  response = client.attach_policy(
+                      PolicyId=deny_all_scp_id,
+                      TargetId=source_ou_id
+                  )
+                  logger.info(f"Successfully attached Deny All SCP to OU {source_ou_id}")
+                  return {"statusCode": 200, "body": json.dumps(response)}
+              except Exception as e:
+                  logger.error(f"Error in attaching SCP: {str(e)}")
+                  return {"statusCode": 500, "body": json.dumps({"error": str(e)})}
+
+          # Additional helper functions (if any)...
+
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: python3.11
+      Timeout: 300
+
+  sqsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: dlq
+
+  BudgetRestrictorEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: "BudgetRestrictorEventBus"
+
+  
+
+  BudgetRestrictorEventBusPolicy:
+    Type: AWS::Events::EventBusPolicy
+    Properties:
+      StatementId: "AllowAllAccountsFromOrganizationToPutEvents"
+      EventBusName: !Ref BudgetRestrictorEventBus
+      Action: "events:PutEvents"
+      Principal: "*"
+      Condition:
+        Type: "StringEquals"
+        Key: "aws:PrincipalOrgID"
+        Value: !Ref OrgID
+
+  BudgetAlertRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Trigger Lambda function for account movement on budget alert"
+      EventBusName: !Ref BudgetRestrictorEventBus
+      EventPattern:
+        source:
+          - "lambda.BudgetAlertForwarder"
+        detail-type:
+          - "Budget Alert"
+      State: "ENABLED"
+      Targets:
+        - Arn: !GetAtt AccountMover.Arn
+          Id: "AccountMoverTarget"
+          DeadLetterConfig:
+            Arn: !GetAtt sqsQueue.Arn
+
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties: {}
+
+  SNSSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !Ref SubscriptionEndPoint
+      Protocol: !Ref SubscriptionProtocol
+      TopicArn: !Ref SNSTopic
+
+  CrossAccountRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              AWS: "*" # Allows any principal within AWS to assume this role
+            Action: "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: "OrganizationManagementPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "organizations:MoveAccount"
+                  - "organizations:ListAccounts"
+                  - "organizations:ListOrganizationalUnitsForParent"
+                  - "organizations:DescribeOrganizationalUnit"
+                  - "organizations:DescribeAccount"
+                  - "organizations:ListAccountsForParent"
+                  - "organizations:AttachPolicy"
+                Resource: "*"
+              - Sid: "Logging"  
+                Effect: "Allow"
+                Action: 
+                  - "logs:CreateLogGroup"
+                Resource: 
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              - Sid: "CreateLogStream"  
+                Effect: "Allow"
+                Action: 
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: 
+                  - "*"  
+      RoleName: "CrossAccountOrganizationRole"
+
+Outputs:
+  BudgetRestrictorEventBusArn:
+    Description: "ARN of the Centralized Budget Restrictor EventBus"
+    Value: !GetAtt BudgetRestrictorEventBus.Arn
+  CrossAccountRoleArn:
+    Description: "ARN of the CrossAccountRole for the lambda functions in the member accounts to assume."
+    Value: !GetAtt CrossAccountRole.Arn
