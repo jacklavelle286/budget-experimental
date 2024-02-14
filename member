@@ -1,0 +1,216 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Member Account Budget and Event Forwarding Setup"
+
+Parameters:
+  BudgetAmountPerMonth:
+    Type: Number
+    Description: "The total budget value per account in USD, per month (which will trigger an account quarantine process.)"
+
+  CentralEventBusArn:
+    Type: String
+    Description: "ARN of the Centralized Event Bus in the Management Account"
+
+  OrgRootId:
+    Type: String
+    Description: "Root ID of the AWS Organization"
+
+  CrossAccountRoleArn:
+    Type: String
+    Description: "ARN of the Cross Account Role in the Management Account"
+
+  ManagementAccountId:
+    Type: String
+    Description: "The AWS Account ID of the Management Account."
+
+
+Resources:
+  BudgetExample:
+    Type: "AWS::Budgets::Budget"
+    Properties:
+      Budget:
+        BudgetLimit:
+          Amount: !Ref BudgetAmountPerMonth
+          Unit: USD
+        TimeUnit: MONTHLY
+        BudgetType: COST
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref SNSTopicForBudget
+
+  SNSTopicForBudget:
+    Type: "AWS::SNS::Topic"
+    Properties:
+      TopicName: "BudgetExceededTopic"
+
+  SNSTopicSubscription:
+    Type: "AWS::SNS::Subscription"
+    Properties:
+      Protocol: "lambda"
+      Endpoint: !GetAtt BudgetAlertLambda.Arn
+      TopicArn: !Ref SNSTopicForBudget
+
+  SNSTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: budgets.amazonaws.com
+            Action:
+              - SNS:Publish
+            Resource: !Ref SNSTopicForBudget
+      Topics:
+        - Ref: SNSTopicForBudget
+
+  LambdaInvokePermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !GetAtt BudgetAlertLambda.Arn
+      Principal: "sns.amazonaws.com"
+      SourceArn: !Ref SNSTopicForBudget
+
+  BudgetAlertLambdaRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "lambda.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: "LambdaBudgetAlertPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "events:PutEvents"
+                Resource: !Ref CentralEventBusArn
+
+              - Effect: "Allow"
+                Action:
+                  - "organizations:ListOrganizationalUnitsForParent"
+                  - "organizations:DescribeOrganizationalUnit"
+                  - "organizations:ListAccountsForParent"
+                Resource: "*"
+
+              - Effect: "Allow"
+                Action: "sts:AssumeRole"
+                Resource: !Sub "arn:aws:iam::${ManagementAccountId}:role/CrossAccountOrganizationRole"
+
+  BudgetAlertLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import os
+          import logging
+
+          # Setting up logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def assume_role(arn, session_name):
+              sts_client = boto3.client('sts')
+              assumed_role_object = sts_client.assume_role(
+                  RoleArn=arn,
+                  RoleSessionName=session_name
+              )
+              credentials = assumed_role_object['Credentials']
+              return boto3.Session(
+                  aws_access_key_id=credentials['AccessKeyId'],
+                  aws_secret_access_key=credentials['SecretAccessKey'],
+                  aws_session_token=credentials['SessionToken'],
+              )
+
+          def lambda_handler(event, context):
+              # Log the start of the function
+              logger.info("Lambda function has started.")
+
+              # Retrieve environment variables
+              cross_account_role_arn = os.getenv('CROSS_ACCOUNT_ROLE_ARN')
+              central_event_bus_arn = os.getenv('CENTRAL_EVENT_BUS_ARN')
+
+              logger.info(f"Assuming role: {cross_account_role_arn}")
+              session = assume_role(cross_account_role_arn, 'BudgetAlertSession')
+              org_client = session.client('organizations')
+
+              # Log the retrieval of the account ID and source OU ID
+              account_id = context.invoked_function_arn.split(":")[4]
+              logger.info(f"Retrieved account ID: {account_id}")
+
+              source_ou_id = get_source_ou_id(org_client, account_id)
+              if not source_ou_id:
+                  logger.error(f"OU ID for account {account_id} not found.")
+                  return {"statusCode": 404, "body": "OU ID not found"}
+              logger.info(f"Retrieved source OU ID: {source_ou_id}")
+              
+              # Construct the event payload
+              event_payload = {
+                  'Source': 'lambda.BudgetAlertForwarder',
+                  'DetailType': 'Budget Alert',
+                  'Detail': json.dumps({
+                      'account_id': account_id,
+                      'source_ou_id': source_ou_id
+                  }),
+                  'EventBusName': central_event_bus_arn
+              }
+              
+              # Log the full event payload for debugging
+              logger.info(f"Full event payload being sent to EventBridge: {event_payload}")
+              
+              # Instantiate the EventBridge client
+              eventbridge_client = boto3.client('events')
+              
+              # Send the event to the central EventBridge bus
+              response = eventbridge_client.put_events(
+                  Entries=[event_payload]
+              )
+              
+              logger.info(f"Event sent to EventBridge: {response}")
+              return response
+
+          def get_source_ou_id(client, account_id):
+              # Retrieve the root ID from the environment variables
+              org_root_id = os.getenv('ORG_ROOT_ID')
+
+              # Iterate through all OUs to find which one contains the account
+              paginator = client.get_paginator('list_organizational_units_for_parent')
+              for page in paginator.paginate(ParentId=org_root_id):
+                  for ou in page['OrganizationalUnits']:
+                      if account_in_ou(client, account_id, ou['Id']):
+                          return ou['Id']
+              return None
+
+          def account_in_ou(client, account_id, ou_id):
+              # Check if the specified account is in the specified OU
+              paginator = client.get_paginator('list_accounts_for_parent')
+              for page in paginator.paginate(ParentId=ou_id):
+                  for account in page['Accounts']:
+                      if account['Id'] == account_id:
+                          return True
+              return False
+
+      FunctionName: "BudgetAlertForwarder"
+      Handler: "index.lambda_handler"
+      Role: !GetAtt BudgetAlertLambdaRole.Arn
+      Runtime: "python3.11"
+      Timeout: 300
+      Environment:
+        Variables:
+          CENTRAL_EVENT_BUS_ARN: !Ref CentralEventBusArn
+          ORG_ROOT_ID: !Ref OrgRootId
+          CROSS_ACCOUNT_ROLE_ARN: !Ref CrossAccountRoleArn
