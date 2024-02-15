@@ -70,15 +70,6 @@ Resources:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       RoleName: lambda-role-account-mover
 
-  LambdaInvokePermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !GetAtt AccountMover.Arn
-      Action: "lambda:InvokeFunction"
-      Principal: "events.amazonaws.com"
-      SourceArn: !GetAtt BudgetRestrictorEventBus.Arn
-
-
 
   AccountMover:
     Type: AWS::Lambda::Function
@@ -159,7 +150,7 @@ Resources:
           Principal: 
             AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
           Action:
-          - 'sqs:*'
+          - 'SQS:*'
           Resource: !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:dlq 
         - Sid: 'dlq_AccountMoverTarget'
           Effect: 'Allow'
@@ -170,7 +161,8 @@ Resources:
           Resource: !GetAtt sqsQueue.Arn
           Condition:
             ArnEquals:
-              aws:SourceArn: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/BudgetAlertForwarderRule"
+              aws:SourceArn: !Sub "arn:aws:events:us-east-1:${AWS::AccountId}:rule/BudgetRestrictorEventBus/BudgetAlertForwarderRule"
+              
       Queues:
         - !Ref sqsQueue
 
@@ -211,6 +203,15 @@ Resources:
           Id: "AccountMoverTarget"
           DeadLetterConfig:
             Arn: !GetAtt sqsQueue.Arn
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AccountMover.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt BudgetAlertRule.Arn
+
 
   SNSTopic:
     Type: AWS::SNS::Topic
