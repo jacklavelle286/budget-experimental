@@ -1,4 +1,4 @@
-## Budget Restrictor 
+[osp management account cost restrictor.pptx](https://github.com/jacklavelle286/budget-experimental/files/14312384/osp.management.account.cost.restrictor.pptx)## Budget Restrictor 
 
 # Overview
 
@@ -23,3 +23,15 @@ There are two cloudformation stacks, one for the management account and one for 
 If these two solutions are triggered in order, we will achieve the following:
 
 The Member account function will shutdown resources causing excessive spend (EC2 in used so far but we can include any compute / Database service if we want to) and revokes access keys to remove any bad actors from the account who have spun up resources programatically. Then, the Multi-Account SCP solution will apply a restrictive SCP to the originating OU which will prevent any more service being used, access to the accounts and remove the ability to incur any more spend. 
+
+
+# Diagram for MultiAccount SCP Solution
+
+![osp management account cost restrictor](https://github.com/jacklavelle286/budget-experimental/assets/78485499/bc11df9b-eaf7-43c4-8167-d60b67bf0e62)
+
+# Diagram for Member Account Solution
+
+![osp member account cost restrictor](https://github.com/jacklavelle286/budget-experimental/assets/78485499/54069b63-ed66-46fe-829e-cfc3d9ba6fce)
+
+
+
