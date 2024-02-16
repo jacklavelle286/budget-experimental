@@ -25,13 +25,12 @@ If these two solutions are triggered in order, we will achieve the following:
 The Member account function will shutdown resources causing excessive spend (EC2 in used so far but we can include any compute / Database service if we want to) and revokes access keys to remove any bad actors from the account who have spun up resources programatically. Then, the Multi-Account SCP solution will apply a restrictive SCP to the originating OU which will prevent any more service being used, access to the accounts and remove the ability to incur any more spend. 
 
 
-# Diagram for MultiAccount SCP Solution
+# Diagram for Multi Account SCP Solution
 
 ![osp management account cost restrictor](https://github.com/jacklavelle286/budget-experimental/assets/78485499/bc11df9b-eaf7-43c4-8167-d60b67bf0e62)
 
 # Diagram for Member Account Solution
 
-![osp member account cost restrictor](https://github.com/jacklavelle286/budget-experimental/assets/78485499/54069b63-ed66-46fe-829e-cfc3d9ba6fce)
 
-
+![osp member account cost restrictor](https://github.com/jacklavelle286/budget-experimental/assets/78485499/54a064c4-7a71-4a21-8707-90717979a981)
 
