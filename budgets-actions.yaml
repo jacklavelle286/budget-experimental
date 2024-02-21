@@ -5,7 +5,8 @@ Description: |
 Parameters:
   BudgetAmountPerMonth:
     Type: Number
-    Description: "The total budget value per account in USD, per month (which will trigger the stopping of EC2 instances and disabling of all IAM keys.)"
+    Description: "This stack automates cost control by halting AWS services when a budget limit is reached. 
+      It integrates AWS Budgets, SNS, and Lambda to monitor spending and execute resource shutdowns across EC2, IAM, ECS, EKS, and RDS services."
 
 Resources:
   Budget:
@@ -59,7 +60,7 @@ Resources:
       FunctionName: !GetAtt BudgetAlertLambda.Arn
       Principal: "sns.amazonaws.com"
       SourceArn: !Ref SNSTopicBudget
-
+  
   BudgetLambdaRole:
     Type: "AWS::IAM::Role"
     Properties:
@@ -87,18 +88,42 @@ Resources:
                   - "iam:ListAccessKeys"
                   - "iam:UpdateAccessKey"
                   - "iam:ListUsers"
+                  - "iam:GetRole"
+                  - "iam:UpdateAssumeRolePolicy"
+                Resource: "*"
+              - Effect: "Allow"
+                Action:
+                  - "ecs:ListClusters"
+                  - "ecs:ListServices"
+                  - "ecs:UpdateService"
+                Resource: "*"
+              - Effect: "Allow"
+                Action:
+                  - "eks:ListClusters"
+                  - "eks:ListNodegroups"
+                  - "eks:UpdateNodegroupConfig"
+                  - "eks:DescribeNodegroup"
+                Resource: "*"
+              - Effect: "Allow"
+                Action:
+                  - "rds:DescribeDBInstances"
+                  - "rds:StopDBInstance"
+                Resource: "*"
+              - Effect: "Allow"
+                Action:
+                  - "lambda:ListFunctions"
+                  - "lambda:PutFunctionConcurrency"
+                  - "lambda:UpdateFunctionConfiguration"
                 Resource: "*"
               - Effect: "Allow"
                 Action:
                   - "logs:CreateLogGroup"
-                Resource:
-                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+                Resource: "*"
               - Effect: "Allow"
                 Action:
                   - "logs:CreateLogStream"
                   - "logs:PutLogEvents"
-                Resource:
-                  - "*"
+                Resource: "*"
 
   BudgetAlertLambda:
     Type: "AWS::Lambda::Function"
@@ -107,39 +132,50 @@ Resources:
         ZipFile: |
           import boto3
           import logging
+          import json
 
           # Initialize logger
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
 
-          def lambda_handler(event, context):
-              # Initialize the Boto3 clients
-              ec2_client = boto3.client('ec2')
-              iam_client = boto3.client('iam')
+          # Boto3 clients initialization
+          ec2_client = boto3.client('ec2')
+          iam_client = boto3.client('iam')
+          ecs_client = boto3.client('ecs')
+          eks_client = boto3.client('eks')
+          rds_client = boto3.client('rds')
+          lambda_client = boto3.client('lambda')
 
+          def lambda_handler(event, context):
               # Stop EC2 instances
               stop_ec2_instances(ec2_client)
 
               # Deactivate IAM Access Keys
               deactivate_iam_keys(iam_client)
 
+              # Stop ECS Services
+              stop_ecs_services(ecs_client)
+
+              # Scale down EKS Node Groups
+              scale_down_eks_nodegroups(eks_client)
+
+              # Stop RDS Databases
+              stop_rds_databases(rds_client)
+
+              # Modify Lambda Functions (excluding the current one)
+              modify_lambda_functions(lambda_client, context.function_name)
+
               return {
                   'statusCode': 200,
-                  'body': 'EC2 instances stopped and IAM access keys deactivated.'
+                  'body': 'EC2 instances stopped, IAM access keys deactivated, ECS services stopped, EKS node groups scaled down, RDS databases stopped, Lambda functions modified.'
               }
+
 
           def stop_ec2_instances(ec2_client):
               try:
-                  # Describe all EC2 instances
-                  instances = ec2_client.describe_instances(
-                      Filters=[{'Name': 'instance-state-name', 'Values': ['running']}]
-                  )
-
-                  # Extract instance IDs
+                  instances = ec2_client.describe_instances(Filters=[{'Name': 'instance-state-name', 'Values': ['running']}])
                   instance_ids = [instance['InstanceId'] for reservation in instances['Reservations'] for instance in reservation['Instances']]
-
                   if instance_ids:
-                      # Stop instances
                       ec2_client.stop_instances(InstanceIds=instance_ids)
                       logger.info(f'Stopped instances: {instance_ids}')
                   else:
@@ -149,27 +185,118 @@ Resources:
 
           def deactivate_iam_keys(iam_client):
               try:
-                  # List all IAM users
                   users = iam_client.list_users()
-
                   for user in users['Users']:
-                      # List access keys for each user
                       access_keys = iam_client.list_access_keys(UserName=user['UserName'])
-
                       for key in access_keys['AccessKeyMetadata']:
                           if key['Status'] == 'Active':
-                              # Deactivate active access keys
-                              iam_client.update_access_key(
-                                  UserName=user['UserName'],
-                                  AccessKeyId=key['AccessKeyId'],
-                                  Status='Inactive'
-                              )
+                              iam_client.update_access_key(UserName=user['UserName'], AccessKeyId=key['AccessKeyId'], Status='Inactive')
                               logger.info(f'Deactivated access key {key["AccessKeyId"]} for user {user["UserName"]}')
               except Exception as e:
                   logger.error(f'Error deactivating IAM access keys: {e}')
 
-      FunctionName: "BudgetAlertStopInstancesIAM"
+          def stop_ecs_services(ecs_client):
+              try:
+                  clusters = ecs_client.list_clusters()
+                  for cluster_arn in clusters['clusterArns']:
+                      services = ecs_client.list_services(cluster=cluster_arn)
+                      for service_arn in services['serviceArns']:
+                          ecs_client.update_service(cluster=cluster_arn, service=service_arn, desiredCount=0)
+                          logger.info(f'Stopped service {service_arn} in cluster {cluster_arn}')
+              except Exception as e:
+                  logger.error(f'Error stopping ECS services: {e}')
+
+          def scale_down_eks_nodegroups(eks_client):
+              try:
+                  # List all EKS clusters
+                  clusters = eks_client.list_clusters()
+                  for cluster_name in clusters['clusters']:
+                      # List nodegroups of the cluster
+                      nodegroups = eks_client.list_nodegroups(clusterName=cluster_name)
+                      for nodegroup_name in nodegroups['nodegroups']:
+                          # Get current nodegroup configuration
+                          ng = eks_client.describe_nodegroup(clusterName=cluster_name, nodegroupName=nodegroup_name)
+                          current_min_size = ng['nodegroup']['scalingConfig']['minSize']
+
+                          # Check if current minimum size is greater than 0
+                          if current_min_size > 0:
+                              # Update nodegroup to set minimum size and desired size to 0
+                              eks_client.update_nodegroup_config(
+                                  clusterName=cluster_name,
+                                  nodegroupName=nodegroup_name,
+                                  scalingConfig={'minSize': 0, 'desiredSize': 0}
+                              )
+                              logger.info(f'Updated nodegroup {nodegroup_name} in cluster {cluster_name} to minSize 0 and desiredSize 0')
+                          else:
+                              # Update nodegroup to scale down the desired size to 0
+                              eks_client.update_nodegroup_config(
+                                  clusterName=cluster_name,
+                                  nodegroupName=nodegroup_name,
+                                  scalingConfig={'desiredSize': 0}
+                              )
+                              logger.info(f'Scaled down nodegroup {nodegroup_name} in cluster {cluster_name} to desiredSize 0')
+              except Exception as e:
+                  logger.error(f'Error scaling down EKS nodegroups: {e}')
+
+
+          def stop_rds_databases(rds_client):
+              try:
+                  db_instances = rds_client.describe_db_instances()
+                  for db_instance in db_instances['DBInstances']:
+                      db_instance_identifier = db_instance['DBInstanceIdentifier']
+                      rds_client.stop_db_instance(DBInstanceIdentifier=db_instance_identifier)
+                      logger.info(f'Stopped RDS database: {db_instance_identifier}')
+              except Exception as e:
+                  logger.error(f'Error stopping RDS databases: {e}')
+
+          def modify_lambda_functions(lambda_client, iam_client, current_function_name):
+              # List all Lambda functions
+              lambda_functions = lambda_client.list_functions()['Functions']
+
+              for function in lambda_functions:
+                  function_name = function['FunctionName']
+                  role_arn = function['Role']
+                  role_name = role_arn.split('/')[-1]
+
+                  # Skip the current function
+                  if function_name == current_function_name:
+                      continue
+
+                  # Set reserved concurrency to 0 for all other functions
+                  try:
+                      lambda_client.put_function_concurrency(
+                          FunctionName=function_name,
+                          ReservedConcurrentExecutions=0
+                      )
+                      logger.info(f"Set reserved concurrency to 0 for function: {function_name}")
+                  except Exception as e:
+                      logger.error(f"Error setting concurrency for {function_name}: {e}")
+
+                  # Retrieve the current assume role policy for the role associated with the Lambda function
+                  try:
+                      assume_role_policy = iam_client.get_role(RoleName=role_name)['Role']['AssumeRolePolicyDocument']
+                      # Identify and remove 'lambda.amazonaws.com' from the trust policy
+                      for statement in assume_role_policy['Statement']:
+                          # Check if 'lambda.amazonaws.com' is a principal in the statement
+                          if 'Service' in statement['Principal'] and 'lambda.amazonaws.com' in statement['Principal']['Service']:
+                              # Remove 'lambda.amazonaws.com' from the list of services that can assume the role
+                              services = statement['Principal']['Service']
+                              if isinstance(services, list):
+                                  services.remove('lambda.amazonaws.com')
+                              elif isinstance(services, str) and services == 'lambda.amazonaws.com':
+                                  statement['Principal']['Service'] = []
+
+                      # Update the role's trust policy to reflect the removal of 'lambda.amazonaws.com'
+                      iam_client.update_assume_role_policy(
+                          RoleName=role_name,
+                          PolicyDocument=json.dumps(assume_role_policy)
+                      )
+                      logger.info(f"Updated trust policy to remove lambda.amazonaws.com for role: {role_name}")
+                  except Exception as e:
+                      logger.error(f"Error updating trust policy for role {role_name}: {e}")
+
+      FunctionName: "BudgetAlertStopInstances"
       Handler: "index.lambda_handler"
       Role: !GetAtt BudgetLambdaRole.Arn
-      Runtime: "python3.11"
+      Runtime: "python3.12"
       Timeout: 300
