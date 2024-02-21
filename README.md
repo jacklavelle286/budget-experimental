@@ -1,5 +1,3 @@
-[osp management account cost restrictor.pptx](https://github.com/jacklavelle286/budget-experimental/files/14312384/osp.management.account.cost.restrictor.pptx)## Budget Restrictor 
-
 # Overview
 
 The budget restrictor solution invovles two paralell solutions which are designed to control budgets in two ways, by being triggered in the following order:
