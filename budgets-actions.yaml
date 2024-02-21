@@ -163,7 +163,7 @@ Resources:
               stop_rds_databases(rds_client)
 
               # Modify Lambda Functions (excluding the current one)
-              modify_lambda_functions(lambda_client, context.function_name)
+               modify_lambda_functions(lambda_client, iam_client, context.function_name)
 
               return {
                   'statusCode': 200,
@@ -300,3 +300,8 @@ Resources:
       Role: !GetAtt BudgetLambdaRole.Arn
       Runtime: "python3.12"
       Timeout: 300
+
+      
+
+
+      
