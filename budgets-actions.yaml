@@ -7,6 +7,10 @@ Parameters:
     Type: Number
     Description: "This stack automates cost control by halting AWS services when a budget limit is reached. 
       It integrates AWS Budgets, SNS, and Lambda to monitor spending and execute resource shutdowns across EC2, IAM, ECS, EKS, and RDS services."
+  
+  EscalationEmail:
+    Type: String
+    Description: "Email address to receive budget alerts."
 
 Resources:
   Budget:
@@ -37,6 +41,13 @@ Resources:
     Properties:
       Protocol: "lambda"
       Endpoint: !GetAtt BudgetAlertLambda.Arn
+      TopicArn: !Ref SNSTopicBudget
+
+  SNSEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !Ref EscalationEmail
+      Protocol: "email"
       TopicArn: !Ref SNSTopicBudget
 
   SNSPolicy:
@@ -163,7 +174,7 @@ Resources:
               stop_rds_databases(rds_client)
 
               # Modify Lambda Functions (excluding the current one)
-               modify_lambda_functions(lambda_client, iam_client, context.function_name)
+              modify_lambda_functions(lambda_client, iam_client, context.function_name)
 
               return {
                   'statusCode': 200,
@@ -272,36 +283,8 @@ Resources:
                   except Exception as e:
                       logger.error(f"Error setting concurrency for {function_name}: {e}")
 
-                  # Retrieve the current assume role policy for the role associated with the Lambda function
-                  try:
-                      assume_role_policy = iam_client.get_role(RoleName=role_name)['Role']['AssumeRolePolicyDocument']
-                      # Identify and remove 'lambda.amazonaws.com' from the trust policy
-                      for statement in assume_role_policy['Statement']:
-                          # Check if 'lambda.amazonaws.com' is a principal in the statement
-                          if 'Service' in statement['Principal'] and 'lambda.amazonaws.com' in statement['Principal']['Service']:
-                              # Remove 'lambda.amazonaws.com' from the list of services that can assume the role
-                              services = statement['Principal']['Service']
-                              if isinstance(services, list):
-                                  services.remove('lambda.amazonaws.com')
-                              elif isinstance(services, str) and services == 'lambda.amazonaws.com':
-                                  statement['Principal']['Service'] = []
-
-                      # Update the role's trust policy to reflect the removal of 'lambda.amazonaws.com'
-                      iam_client.update_assume_role_policy(
-                          RoleName=role_name,
-                          PolicyDocument=json.dumps(assume_role_policy)
-                      )
-                      logger.info(f"Updated trust policy to remove lambda.amazonaws.com for role: {role_name}")
-                  except Exception as e:
-                      logger.error(f"Error updating trust policy for role {role_name}: {e}")
-
       FunctionName: "BudgetAlertStopInstances"
       Handler: "index.lambda_handler"
       Role: !GetAtt BudgetLambdaRole.Arn
       Runtime: "python3.12"
       Timeout: 300
-
-      
-
-
-      
